@@ -82,10 +82,26 @@ curl -X POST https://imgenai.net/v1/images/generations \
 
 ### 图生图（带参考图）
 
-把本地图片 base64 嵌入 `image` 字段。**必须带 `data:image/png;base64,` 前缀**：
+⚠️ **参考图必须先压缩再传**：原图直传（手机拍的动辄几 MB）上传慢，国内上行带宽差时会超过服务器上传超时被掐断，客户端报 `408` / `ConnectionResetError(10054) 远程主机强制断开`。**先把最长边缩到 ≤1536px + JPEG 压缩**，体积能小 5-10 倍，根治掉线。**千万别 `base64 -i 大图.png` 直传。**
+
+用 Python（Pillow，跨平台 Windows/Mac/Linux；缺了先 `pip install pillow` 或 `pip3 install pillow`）压缩并输出 data URL：
+
+```python
+# compress_ref.py — 用法: python compress_ref.py 参考图.png
+import sys, base64, io
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGB")
+M = 1536  # 最长边上限；要更精细可调到 2048
+if max(im.size) > M:
+    r = M / max(im.size)
+    im = im.resize((round(im.size[0]*r), round(im.size[1]*r)), Image.LANCZOS)
+buf = io.BytesIO(); im.save(buf, "JPEG", quality=88, optimize=True)
+print("data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode())
+```
 
 ```bash
-IMG_B64=$(base64 -i input.png | tr -d '\n')
+# Windows 用 python；Mac/Linux 可能要写 python3
+REF=$(python compress_ref.py input.png)
 curl -X POST https://imgenai.net/v1/images/generations \
   -H "Authorization: Bearer $IMGENAI_API_KEY" \
   -H "Content-Type: application/json" \
@@ -94,9 +110,11 @@ curl -X POST https://imgenai.net/v1/images/generations \
     \"prompt\": \"把这张图改成水彩风格\",
     \"aspect_ratio\": \"1:1\",
     \"image_size\": \"1K\",
-    \"image\": \"data:image/png;base64,$IMG_B64\"
+    \"image\": \"$REF\"
   }" | jq -r '.data[0].url'
 ```
+
+> `image` 字段必须带与实际格式一致的前缀（压缩后是 `data:image/jpeg;base64,`，脚本已自动加好，别再手动拼 png 前缀）。只有原图本就很小（<500KB）时，才可跳过压缩直接 `base64 -i input.png` 传 PNG。
 
 ### Python（OpenAI SDK）
 
@@ -176,7 +194,7 @@ curl https://imgenai.net/v1/images/generations/7-xxx-yyy \
 1. **检查环境**：`echo "${IMGENAI_API_KEY:-未设}"`，没有就提示用户
 2. **选模型**：按上面"选型默认值"，特殊场景看用户原话
 3. **选参数**：aspect_ratio 默认 1:1，image_size 默认 1K
-4. **构造请求**：txt2img 不带 `image`；img2img 带 base64 前缀
+4. **构造请求**：txt2img 不带 `image`；img2img **先用 compress_ref.py 压缩参考图**再放进 `image`（直传大图会掉线）
 5. **发请求**：sync 模式直接 curl/SDK，等 30s-3min
 6. **回显结果**：把图片 URL 给用户。在 Markdown 支持的 IDE 里用 `![](url)` 内联预览；不支持就给链接
 7. **失败兜底**：400 看错误消息修参数；402 提示充值
@@ -185,6 +203,6 @@ curl https://imgenai.net/v1/images/generations/7-xxx-yyy \
 
 - imgenai.net 用 nginx + Cloudflare，curl 偶发 502 是缓存问题，重试一次基本就好
 - 同步模式服务端阻塞等结果，所以 axios/fetch 客户端**超时要设到 4 分钟以上**（默认 30s 经常被掐）
-- 参考图 base64 必须带 `data:image/png;base64,` 前缀，否则 `nano-banana-2-cl` 可能识别不到
+- **参考图务必先压缩到最长边 ≤1536px + JPEG 再传**（见上面"图生图"段）。大图直传国内上行慢，会超服务器上传超时被掐断，客户端报 `ConnectionResetError(10054)` / `408`——这是真实踩过的坑。data URL 前缀要和实际格式一致（压缩后用 `data:image/jpeg;base64,`），缺前缀 `nano-banana-2-cl` 识别不到
 - 不支持 `n>1`，每次请求出 1 张图。多张图就并发多个请求
 - 文档源头：https://imgenai.net → 控制台 → API 文档
